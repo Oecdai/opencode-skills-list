@@ -108,6 +108,11 @@ class SkillRecord:
     trim: list[str] = field(default_factory=list)
     add_new: list[str] = field(default_factory=list)
     installed_mtime: float = 0.0
+    command_files: list[str] = field(default_factory=list)
+    command_config_scopes: list[str] = field(default_factory=list)
+    slash_entry: bool = False
+    duplicate_scopes: list[str] = field(default_factory=list)
+    duplicate_paths: list[str] = field(default_factory=list)
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,19 +125,52 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def discover_project_root(cwd: Path) -> Path | None:
+    for current in [cwd, *cwd.parents]:
+        if (current / ".opencode").exists():
+            return current
+    return None
+
+
 def discover_roots(cwd: Path) -> list[tuple[str, Path]]:
     roots: list[tuple[str, Path]] = []
     global_root = Path.home() / ".config" / "opencode" / "skills"
     if global_root.exists():
         roots.append(("global", global_root))
-
-    for current in [cwd, *cwd.parents]:
-        project_root = current / ".opencode" / "skills"
-        if project_root.exists():
-            roots.append(("project", project_root))
-            break
-
+    project_root = discover_project_root(cwd)
+    if project_root:
+        project_skills = project_root / ".opencode" / "skills"
+        if project_skills.exists():
+            roots.append(("project", project_skills))
     return roots
+
+
+def load_command_map(cwd: Path) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    config_commands: dict[str, list[str]] = defaultdict(list)
+    file_commands: dict[str, list[str]] = defaultdict(list)
+
+    global_command_dir = Path.home() / ".config" / "opencode" / "commands"
+    if global_command_dir.exists():
+        for path in sorted(global_command_dir.glob("*.md")):
+            file_commands[path.stem].append("global")
+
+    project_root = discover_project_root(cwd)
+    if project_root:
+        project_command_dir = project_root / ".opencode" / "commands"
+        if project_command_dir.exists():
+            for path in sorted(project_command_dir.glob("*.md")):
+                file_commands[path.stem].append("project")
+
+        config_path = project_root / ".opencode" / "opencode.json"
+        if config_path.exists():
+            try:
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                for key in (data.get("command") or {}).keys():
+                    config_commands[key].append("project")
+            except Exception:
+                pass
+
+    return config_commands, file_commands
 
 
 def frontmatter_and_body(text: str) -> tuple[dict[str, Any], str, list[str]]:
@@ -185,7 +223,6 @@ def frontmatter_and_body(text: str) -> tuple[dict[str, Any], str, list[str]]:
             block_key = key
             continue
         data[key] = clean_scalar(value)
-
     return data, body, issues
 
 
@@ -303,6 +340,8 @@ def score_record(record: SkillRecord) -> None:
         maintainability += 8
     if record.has_readme:
         maintainability += 7
+    if record.command_files or record.command_config_scopes:
+        maintainability += 5
     if record.health_issues:
         quality -= min(20, 5 * len(record.health_issues))
         maintainability -= min(18, 4 * len(record.health_issues))
@@ -310,7 +349,6 @@ def score_record(record: SkillRecord) -> None:
         security -= min(35, 5 * len(record.risk_flags))
     if record.hook_usage != "none":
         maintainability += 4
-
     record.quality_score = clamp(quality)
     record.security_score = clamp(security)
     record.maintainability_score = clamp(maintainability)
@@ -339,6 +377,10 @@ def recommendation_pass(record: SkillRecord) -> None:
         record.strengthen.append(
             "add explicit trigger phrases or a When to Use section"
         )
+    if not record.slash_entry:
+        record.strengthen.append(
+            "add a slash command entry if interactive discovery matters"
+        )
     if record.risk_flags and "security" not in record.category:
         record.strengthen.append("document safety boundaries for risky capabilities")
     if record.health_issues:
@@ -358,6 +400,7 @@ def recommendation_pass(record: SkillRecord) -> None:
 
 def build_records(cwd: Path) -> list[SkillRecord]:
     records: list[SkillRecord] = []
+    config_commands, file_commands = load_command_map(cwd)
     for scope, root in discover_roots(cwd):
         for skill_dir in sorted(root.iterdir()):
             if not skill_dir.is_dir():
@@ -395,9 +438,10 @@ def build_records(cwd: Path) -> list[SkillRecord]:
                 if (skill_dir / "references").exists()
                 else []
             )
+            key = skill_dir.name
 
             record = SkillRecord(
-                key=skill_dir.name,
+                key=key,
                 path=str(skill_dir),
                 scope=scope,
                 source_root=str(root),
@@ -422,6 +466,9 @@ def build_records(cwd: Path) -> list[SkillRecord]:
                 summary=choose_summary(description, body),
                 risk_flags=infer_risk(description, body, scripts),
                 installed_mtime=skill_md.stat().st_mtime,
+                command_files=file_commands.get(key, []),
+                command_config_scopes=config_commands.get(key, []),
+                slash_entry=(key in file_commands or key in config_commands),
             )
             if not description:
                 record.health_issues.append("missing-description")
@@ -431,10 +478,48 @@ def build_records(cwd: Path) -> list[SkillRecord]:
             score_record(record)
             records.append(record)
 
+    records = collapse_records(records)
     compute_overlap(records)
     for record in records:
         recommendation_pass(record)
     return records
+
+
+def collapse_records(records: list[SkillRecord]) -> list[SkillRecord]:
+    grouped: dict[str, list[SkillRecord]] = defaultdict(list)
+    for record in records:
+        grouped[record.key].append(record)
+
+    result: list[SkillRecord] = []
+    for key in sorted(grouped):
+        items = sorted(
+            grouped[key], key=lambda item: (item.scope != "project", item.path)
+        )
+        primary = items[0]
+        if len(items) > 1:
+            primary.duplicate_scopes = [item.scope for item in items[1:]]
+            primary.duplicate_paths = [item.path for item in items[1:]]
+            primary.command_files = sorted(
+                set(
+                    primary.command_files
+                    + [scope for item in items[1:] for scope in item.command_files]
+                )
+            )
+            primary.command_config_scopes = sorted(
+                set(
+                    primary.command_config_scopes
+                    + [
+                        scope
+                        for item in items[1:]
+                        for scope in item.command_config_scopes
+                    ]
+                )
+            )
+            primary.slash_entry = primary.slash_entry or any(
+                item.slash_entry for item in items[1:]
+            )
+        result.append(primary)
+    return result
 
 
 def token_set(record: SkillRecord) -> set[str]:
@@ -489,19 +574,30 @@ def compute_overlap(records: list[SkillRecord]) -> None:
 
 def format_summary(records: list[SkillRecord]) -> str:
     grouped: dict[str, list[SkillRecord]] = defaultdict(list)
-    for record in sorted(records, key=lambda item: (item.category, item.key)):
+    project_count = sum(1 for item in records if item.scope == "project")
+    slash_count = sum(1 for item in records if item.slash_entry)
+    duplicate_count = sum(1 for item in records if item.duplicate_paths)
+    for record in sorted(
+        records, key=lambda item: (item.category, item.key, item.scope)
+    ):
         grouped[record.category].append(record)
-    lines = [f"Skills Summary ({len(records)} skills)"]
+    lines = [
+        f"Skills Summary ({len(records)} skills)",
+        f"project={project_count} global={len(records) - project_count} slash-enabled={slash_count} duplicates-collapsed={duplicate_count}",
+    ]
     for category in sorted(grouped):
         items = grouped[category]
         lines.append("")
         lines.append(f"[{category}] {len(items)}")
         for item in items:
             version = item.version or "n/a"
+            slash = "yes" if item.slash_entry else "no"
             lines.append(
-                f"- {item.key} | v={version} | score={item.score} | status={item.availability_status} | update={item.update_status}"
+                f"- {item.key} | scope={item.scope} | v={version} | score={item.score} | slash={slash} | update={item.update_status}"
             )
             lines.append(f"  {item.summary}")
+            if item.duplicate_scopes:
+                lines.append(f"  duplicates: {', '.join(item.duplicate_scopes)}")
     return "\n".join(lines)
 
 
@@ -515,6 +611,16 @@ def format_detail(record: SkillRecord) -> str:
     lines.append(f"status: {record.availability_status}")
     lines.append(f"update: {record.update_status}")
     lines.append(f"hooks: {record.hook_usage}")
+    lines.append(f"slash-entry: {'yes' if record.slash_entry else 'no'}")
+    lines.append(
+        f"duplicates: {', '.join(record.duplicate_scopes) if record.duplicate_scopes else 'none'}"
+    )
+    lines.append(
+        f"command-files: {', '.join(record.command_files) if record.command_files else 'none'}"
+    )
+    lines.append(
+        f"command-config: {', '.join(record.command_config_scopes) if record.command_config_scopes else 'none'}"
+    )
     lines.append(
         f"allowed-tools: {' '.join(record.allowed_tools) if record.allowed_tools else 'none'}"
     )
@@ -569,8 +675,10 @@ def format_audit(records: list[SkillRecord]) -> str:
         lines.append(f"[{category}]")
         for item in items:
             lines.append(
-                f"- {item.key} | score={item.score} | conflict={item.conflict_risk} | risk={len(item.risk_flags)} | issues={len(item.health_issues)} | update={item.update_status}"
+                f"- {item.key} | scope={item.scope} | score={item.score} | conflict={item.conflict_risk} | risk={len(item.risk_flags)} | issues={len(item.health_issues)} | slash={'yes' if item.slash_entry else 'no'}"
             )
+            if item.duplicate_scopes:
+                lines.append(f"  duplicates: {', '.join(item.duplicate_scopes)}")
             if item.overlap_skills:
                 lines.append(f"  overlap: {', '.join(item.overlap_skills[:4])}")
             if item.risk_flags:
@@ -588,7 +696,6 @@ def main() -> int:
     args = parse_args()
     cwd = Path(args.cwd).resolve()
     records = build_records(cwd)
-
     if args.mode == "detail":
         skill = args.named_skill or args.positional_skill
         if not skill:
@@ -618,7 +725,6 @@ def main() -> int:
             if args.format == "json"
             else format_audit(records)
         )
-
     if args.format == "json":
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
