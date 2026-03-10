@@ -70,6 +70,12 @@ give me details for skills-list
 - 大多数 skills 没有显式 enabled/disabled 开关，所以状态通常是推断值
 - 重叠与冲突属于启发式分析，目的是帮助审计，不代表绝对结论
 
+### 发布规范
+
+- 本仓库默认采用中英双语 Release
+- 只要有已推送更新，就应创建对应的 GitHub Release
+- 详细规则见 `RELEASING.md`
+
 ## English
 
 OpenCode skill for auditing installed skills with summary, detail, and category-first audit views, including versions, triggers, overlap, risk, and improvement suggestions.
@@ -137,3 +143,9 @@ give me details for skills-list
 - `update_status` is conservative and defaults to `unknown` without hard evidence
 - enabled/disabled state is inferred, not declared by most skills today
 - overlap and conflict are heuristic, intended as audit hints rather than hard truth
+
+### Release Policy
+
+- This repository uses bilingual GitHub Releases by default
+- Whenever updates have been pushed, a matching GitHub Release should be created
+- See `RELEASING.md` for the full policy
