@@ -2,20 +2,18 @@
 description: Inspect installed OpenCode skills in summary, detail, or audit mode.
 ---
 
-Use the `skills-list` skill and run the local analyzer for the requested mode.
+Use the global `skills-list` analyzer result below to answer the user's request.
 
-Interpret `$ARGUMENTS` as one of:
+Requested arguments: `$ARGUMENTS`
 
-- `summary`
-- `detail <skill-name>`
-- `audit`
+Analyzer output:
 
-Rules:
+!`python ~/.config/opencode/skills/skills-list/scripts/command_entry.py $ARGUMENTS`
 
-1. If no arguments are given, default to `summary`.
-2. For `detail`, require a skill name.
-3. Always run the local analyzer first:
-   - `python ~/.config/opencode/skills/skills-list/scripts/skills_list.py summary`
-   - `python ~/.config/opencode/skills/skills-list/scripts/skills_list.py detail --skill <name>`
-   - `python ~/.config/opencode/skills/skills-list/scripts/skills_list.py audit`
-4. Summarize the result clearly for the user instead of dumping unnecessary raw output unless they explicitly ask for JSON.
+Summarize the result clearly.
+
+If the user requested a detail view without a skill name, explain the correct usage:
+
+`/skills-list detail <skill-name>`
+
+If the user asks for raw structured output, mention that `--format json` is supported by the analyzer script.
